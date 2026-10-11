@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-ask-the-group — v0.2
+ask-the-group — v0.3
 
-Reads a folder of .txt/.md files and prompts you to ask a question.
-Returns a passage from those text files that may best answers it.
+Reads a folder of .txt/.md files. Three commands:
 
-Standard library only. Python 3.7 or +.
+    index <folder>
+        Build a local search index over the folder.
 
-Usage:
-    python ask_the_group.py index <folder>
-    python ask_the_group.py ask <folder> "your question"
+    ask <folder> "question"
+        Return the passage that best answers the question.
+
+    actions <folder>
+        Pull action items out of meeting notes.
+
+Standard library only. Python 3.7+.
 """
 
 import os
@@ -22,7 +26,6 @@ from datetime import datetime     # for time-stamping
 
 INDEX_FILENAME = ".ask_the_group_index.json"
 
-
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
     "can", "could", "did", "do", "does", "for", "from", "get", "had",
@@ -34,6 +37,42 @@ STOPWORDS = {
     "which", "who", "why", "will", "with", "would", "you", "your",
 }
 
+
+# --- action-item detection ------------------------------------------------
+
+ACTION_TRIGGERS = [
+    r"\bwill\b", r"\bto-?do\b", r"\baction\b", r"\baction item\b",
+    r"\bneeds to\b", r"\bmust\b", r"\bshould\b", r"\bfollow[- ]?up\b",
+    r"\bassign(?:ed)?\b", r"\bvolunteer(?:s|ed)? to\b",
+    r"\bnext step\b", r"\bby (?:mon|tues|wednes|thurs|fri|satur|sun)day\b",
+    r"\bby next\b", r"\bby end of\b", r"\bdeadline\b",
+]
+
+NEGATIVE_TRIGGERS = [
+    r"\bdiscussed\b", r"\bconsidered\b", r"\bmight\b", r"\bmaybe\b",
+    r"\bwondering\b", r"\bnot sure\b", r"\btbd\b", r"\bparking lot\b",
+]
+
+BULLET_PREFIXES = re.compile(r"^\s*(?:[-*•]|\d+[.)]|\[\s?\])\s*")
+
+CHAT_LINE = re.compile(r"^\s*\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*\w+\s*:")
+
+QUESTION_STARTERS = (
+    "do i ", "does anyone", "where do i", "where is", "where are",
+    "what if", "when is", "when do", "who do i", "who is",
+    "how do i", "how do we", "can i ", "can we ", "is there",
+    "are there", "are we ", "anyone know", "should i ",
+)
+
+
+def is_question(body):
+    if body.rstrip().endswith("?"):
+        return True
+    low = body.lower()
+    return any(low.startswith(w) for w in QUESTION_STARTERS)
+
+
+# --- text helpers ---------------------------------------------------------
 
 #tokenize that is preliminary text processing
 def tokenize(text):
@@ -57,6 +96,21 @@ def split_into_chunks(text, max_lines=6):
     return chunks
 
 
+def strip_bullet(line):
+    return BULLET_PREFIXES.sub("", line).strip()
+    
+
+#decides whether a line is an action item
+def looks_like_action(text):
+    low = text.lower()
+    if any(re.search(p, low) for p in NEGATIVE_TRIGGERS):
+        if not re.search(r"\b(will|assign(?:ed)? to|action item|deadline)\b", low):
+            return False
+    return any(re.search(p, low) for p in ACTION_TRIGGERS)
+
+
+# --- file discovery and reading -------------------------------------------
+
 def find_text_files(folder):
     if not os.path.isdir(folder):
         sys.exit(f"ERROR: Not a folder: {folder}")
@@ -79,23 +133,17 @@ def read_text(path):
         return ""
 
 
+# --- index ----------------------------------------------------
+
 #break every file into chunks, count how often each meaningful term-frequency in each chunk and record which words appear across how many chunks.
 def build_index(folder):
-    if not os.path.isdir(folder):
-        answer = input(f"'{folder}' doesn't exist. Create it? [y/N] ").strip().lower()
-        if answer == "y":
-            os.makedirs(folder, exist_ok=True)
-            print(f"Created {folder}.")
-            print(f"Add your .txt or .md notes there, then run:")
-            print(f"    python ask_the_group.py index {folder}")
-            sys.exit(0)
-        else:
-            sys.exit(f"Cancelled. No folder was created.")
     files = find_text_files(folder)
     if not files:
         sys.exit(f"No .txt or .md files found in {folder}")
+
     docs = []
     doc_freq = Counter()
+
     for path in files:
         rel = os.path.relpath(path, folder)
         text = read_text(path)
@@ -112,7 +160,7 @@ def build_index(folder):
             })
             for term in tf:
                 doc_freq[term] += 1
-    #converts each chunk's word counts into a TF-IDF vector 
+
     N = len(docs)
     for d in docs:
         vec = {}
@@ -123,7 +171,7 @@ def build_index(folder):
         top = sorted(vec.items(), key=lambda x: -x[1])[:40]
         d["vector"] = dict(top)
         del d["tf"]
-    #return in json-like format
+
     return {
         "built_at": datetime.now().isoformat(timespec="seconds"),
         "folder": os.path.abspath(folder),
@@ -133,12 +181,12 @@ def build_index(folder):
     }
 
 
-#save/load index
 def save_index(folder, index):
     path = os.path.join(folder, INDEX_FILENAME)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False)
     return path
+
 
 def load_index(folder):
     path = os.path.join(folder, INDEX_FILENAME)
@@ -149,7 +197,9 @@ def load_index(folder):
         return json.load(f)
 
 
-#compute cosine distance of two vectors
+# --- search (from v0.2) ---------------------------------------------------
+
+#compute cosine distance of two vectors(check mathematical def.)
 def cosine(a, b):
     shared = set(a) & set(b)
     if not shared:
@@ -183,6 +233,62 @@ def search(index, query, top_k=3):
             scored.append((score, d))
     scored.sort(key=lambda x: -x[0])
     return scored[:top_k]
+
+
+# --- actions (new in v0.3) ------------------------------------------------
+
+def find_action_items(folder):
+    files = find_text_files(folder)
+    if not files:
+        sys.exit(f"No .txt or .md files found in {folder}")
+
+    actions = []
+    unclear = []
+
+    for path in files:
+        rel = os.path.relpath(path, folder)
+        text = read_text(path)
+        section = ""
+
+        for lineno, raw in enumerate(text.splitlines(), start=1):
+            line = raw.strip()
+            if not line:
+                continue
+
+            # Track section headings (# Heading, or a short line ending in :)
+            if line.startswith("#") or (line.endswith(":") and len(line) < 60):
+                section = strip_bullet(line.lstrip("# ").rstrip(":"))
+                continue
+
+            body = strip_bullet(line)
+            if len(body.split()) < 3:
+                continue
+            if CHAT_LINE.match(line):
+                continue
+            if is_question(body):
+                continue
+            if not looks_like_action(body):
+                continue
+
+            entry = {
+                "file": rel,
+                "line": lineno,
+                "section": section,
+                "text": body,
+            }
+
+            # A line is "clear" if it names someone or a date.
+            has_name = bool(re.match(r"^[A-Z][a-z]+", body))
+            has_date = bool(re.search(
+                r"\b(mon|tues|wednes|thurs|fri|satur|sun)day\b|"
+                r"\bnext week\b|\bend of\b|\bby \d|\b\d{4}-\d{2}-\d{2}\b",
+                body.lower()))
+            if has_name or has_date:
+                actions.append(entry)
+            else:
+                unclear.append(entry)
+
+    return actions, unclear
 
 
 #user facing wrapper
@@ -231,6 +337,60 @@ def cmd_ask(folder, question):
             print(f"  [{score:.2f}] {d['source']}  —  {snippet}")
 
 
+#action items wrapper
+def cmd_actions(folder):
+    actions, unclear = find_action_items(folder)
+
+    print("=" * 68)
+    print("  ACTION ITEMS")
+    print(f"  From: {folder}")
+    print("=" * 68)
+    print()
+
+    if not actions and not unclear:
+        print("No action items found.")
+        print()
+        print("The script looks for lines with words like 'will', 'should',")
+        print("'needs to', 'follow up', or 'by <day>'. If your notes use")
+        print("different phrasing, that's why nothing was caught.")
+        return
+
+    print(f"CLEAR ACTION ITEMS ({len(actions)})")
+    print("-" * 24)
+    if not actions:
+        print("  None.")
+    else:
+        current = None
+        for a in actions:
+            if a["section"] and a["section"] != current:
+                current = a["section"]
+                print(f"\n  [{current}]")
+            print(f"  {a['file']}:{a['line']}  {a['text']}")
+    print()
+
+    print(f"NEEDS A HUMAN ({len(unclear)})")
+    print("-" * 15)
+    print("These look like actions but don't name a person or a date.")
+    print()
+    if not unclear:
+        print("  None.")
+    else:
+        for a in unclear:
+            print(f"  {a['file']}:{a['line']}  {a['text']}")
+
+    print()
+    print("SUGGESTED NEXT STEPS")
+    print("-" * 21)
+    if unclear:
+        print(f"  * Assign owners to {len(unclear)} item(s) above.")
+    if actions:
+        print(f"  * Follow up on {len(actions)} clear item(s).")
+    if not unclear and not actions:
+        print("  * Nothing to do.")
+
+
+# --- entry point ----------------------------------------------------------
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -247,6 +407,11 @@ def main():
         if len(sys.argv) < 4:
             sys.exit('Usage: python ask_the_group.py ask <folder> "question"')
         cmd_ask(sys.argv[2], " ".join(sys.argv[3:]))
+
+    elif cmd == "actions":
+        if len(sys.argv) < 3:
+            sys.exit("Usage: python ask_the_group.py actions <folder>")
+        cmd_actions(sys.argv[2])
 
     else:
         print(__doc__)

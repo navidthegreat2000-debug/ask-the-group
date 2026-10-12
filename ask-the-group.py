@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-ask-the-group — v0.3
+ask-the-group.py — v1.0
 
-Reads a folder of .txt/.md files. Three commands:
+One small offline script for volunteer coordinators. Reads the
+plain-text files a group already has and turns them into answers,
+action items, and expiry alerts.
+
+Four commands:
 
     index <folder>
         Build a local search index over the folder.
@@ -13,7 +17,14 @@ Reads a folder of .txt/.md files. Three commands:
     actions <folder>
         Pull action items out of meeting notes.
 
+    expiry <file.csv>
+        Read a CSV of certificates / permits / inspections and flag
+        what's expiring.
+
 Standard library only. Python 3.7+.
+
+Options:
+    --version    Show version and exit.
 """
 
 import os
@@ -21,8 +32,11 @@ import sys
 import re          # for regex (text processing)
 import json        # for saving/loading search index
 import math        # for the TF-IDF & mathematical operations
+import csv
 from collections import Counter   # for counting word frequencies
-from datetime import datetime     # for time-stamping
+from datetime import datetime, timedelta, date    # for time-stamping
+
+__version__ = "1.0"
 
 INDEX_FILENAME = ".ask_the_group_index.json"
 
@@ -63,6 +77,29 @@ QUESTION_STARTERS = (
     "how do i", "how do we", "can i ", "can we ", "is there",
     "are there", "are we ", "anyone know", "should i ",
 )
+
+
+# --- expiry detection -----------------------------------------------------
+
+DATE_FORMATS = [
+    "%Y-%m-%d",     # 2025-03-05  (preferred)
+    "%d/%m/%Y",     # 05/03/2025
+    "%m/%d/%Y",     # 03/05/2025  (ambiguous with above)
+    "%d-%m-%Y",     # 05-03-2025
+    "%d %b %Y",     # 05 Mar 2025
+    "%d %B %Y",     # 05 March 2025
+    "%b %d, %Y",    # Mar 05, 2025
+    "%B %d, %Y",    # March 05, 2025
+]
+
+REQUIRED_CSV_COLUMNS = ["item", "holder", "category", "expires"]
+
+EXPIRY_BUCKETS = [
+    ("expired",  lambda d: d < 0),
+    ("urgent",   lambda d: 0 <= d <= 7),
+    ("soon",     lambda d: 8 <= d <= 30),
+    ("quarter",  lambda d: 31 <= d <= 90),
+]
 
 
 def is_question(body):
@@ -107,6 +144,18 @@ def looks_like_action(text):
         if not re.search(r"\b(will|assign(?:ed)? to|action item|deadline)\b", low):
             return False
     return any(re.search(p, low) for p in ACTION_TRIGGERS)
+
+
+def parse_date(value):
+    value = (value or "").strip()
+    if not value:
+        return None
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 # --- file discovery and reading -------------------------------------------
@@ -174,6 +223,7 @@ def build_index(folder):
 
     return {
         "built_at": datetime.now().isoformat(timespec="seconds"),
+        "version": __version__,
         "folder": os.path.abspath(folder),
         "num_chunks": len(docs),
         "doc_freq": dict(doc_freq),
@@ -289,7 +339,75 @@ def find_action_items(folder):
                 unclear.append(entry)
 
     return actions, unclear
+    
 
+# --- expiry (new in v0.4) -------------------------------------------------
+
+def load_csv(path):
+    if not os.path.exists(path):
+        sys.exit(f"ERROR: file not found: {path}")
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            sys.exit(f"ERROR: {path} has no header row.")
+        headers = [h.strip().lower().replace(" ", "_")
+                   for h in reader.fieldnames]
+        rows = []
+        for raw in reader:
+            row = {h.strip().lower().replace(" ", "_"): (v or "").strip()
+                   for h, v in raw.items() if h is not None}
+            if any(row.values()):
+                rows.append(row)
+    return rows, headers
+    
+
+def analyze_expiry(rows, today):
+    result = {
+        "expired": [], "urgent": [], "soon": [], "quarter": [],
+        "later": [], "no_date": [], "bad_dates": [], "missing_fields": [],
+    }
+
+    for i, row in enumerate(rows, start=2):
+        label = row.get("holder") or row.get("item") or f"(row {i})"
+
+        for col in REQUIRED_CSV_COLUMNS:
+            if not row.get(col, ""):
+                result["missing_fields"].append((i, col, label))
+
+        raw_date = row.get("expires", "")
+        if not raw_date:
+            result["no_date"].append((i, label, row.get("category", "")))
+            continue
+
+        parsed = parse_date(raw_date)
+        if parsed is None:
+            result["bad_dates"].append((i, label, raw_date))
+            continue
+
+        days = (parsed - today).days
+        entry = {
+            "row": i,
+            "item": row.get("item", ""),
+            "holder": row.get("holder", ""),
+            "category": row.get("category", ""),
+            "owner": row.get("owner", ""),
+            "expires": parsed,
+            "days": days,
+        }
+
+        placed = False
+        for name, test in EXPIRY_BUCKETS:
+            if test(days):
+                result[name].append(entry)
+                placed = True
+                break
+        if not placed:
+            result["later"].append(entry)
+
+    return result
+
+
+# --- commands -------------------------------------------------------------
 
 #user facing wrapper
 def cmd_index(folder):
@@ -389,12 +507,129 @@ def cmd_actions(folder):
         print("  * Nothing to do.")
 
 
+
+def cmd_expiry(csv_path, today=None):
+    today = today or date.today()
+    rows, headers = load_csv(csv_path)
+
+    missing = [c for c in REQUIRED_CSV_COLUMNS if c not in headers]
+    if missing:
+        print(f"WARNING: CSV is missing expected columns: {', '.join(missing)}")
+        print()
+
+    result = analyze_expiry(rows, today)
+
+    print("=" * 68)
+    print("  EXPIRY & RENEWAL TRACKER")
+    print(f"  File:  {csv_path}")
+    print(f"  Today: {today.isoformat()}")
+    print("=" * 68)
+    print()
+
+    total_action = (len(result["expired"]) + len(result["urgent"])
+                    + len(result["soon"]))
+
+    print("AT A GLANCE")
+    print("-" * 11)
+    print(f"  EXPIRED ................ {len(result['expired']):>3}  ** renew now **")
+    print(f"  Urgent (within 7 days) . {len(result['urgent']):>3}")
+    print(f"  Soon   (within 30 days)  {len(result['soon']):>3}")
+    print(f"  This quarter (<=90d) ... {len(result['quarter']):>3}")
+    print(f"  Later ................. {len(result['later']):>3}")
+    print(f"  Missing date info ..... {len(result['no_date']):>3}")
+    print(f"  Data problems ......... "
+          f"{len(result['bad_dates']) + len(result['missing_fields']):>3}")
+    print()
+    if total_action == 0:
+        print("  Nothing needs renewal right now.")
+    elif result["expired"]:
+        print(f"  *** {len(result['expired'])} item(s) already expired. ***")
+    print()
+
+    def section(title, items):
+        if not items:
+            return
+        print(title)
+        print("-" * len(title))
+        for e in sorted(items, key=lambda x: x["days"]):
+            who = e["holder"] or "(no holder)"
+            cat = e["category"] or "(no category)"
+            if e["days"] < 0:
+                timing = f"EXPIRED {-e['days']} days ago"
+            elif e["days"] == 0:
+                timing = "EXPIRES TODAY"
+            elif e["days"] == 1:
+                timing = "expires tomorrow"
+            else:
+                timing = f"in {e['days']} days"
+            owner = e["owner"] or "** no owner assigned **"
+            print(f"  [{e['row']:>3}] {e['item'][:44]}")
+            print(f"        holder: {who}   category: {cat}")
+            print(f"        expires: {e['expires'].isoformat()}  ({timing})")
+            print(f"        contact: {owner}")
+        print()
+
+    section("EXPIRED — RENEW IMMEDIATELY", result["expired"])
+    section("URGENT — DUE WITHIN 7 DAYS", result["urgent"])
+    section("COMING UP — WITHIN 30 DAYS", result["soon"])
+    section("PLAN AHEAD — THIS QUARTER", result["quarter"])
+
+    if result["later"]:
+        print("LATER (beyond 90 days)")
+        print("-" * 22)
+        print(f"  {len(result['later'])} item(s) — no action needed yet")
+        print()
+
+    problems = (result["no_date"] or result["bad_dates"]
+                or result["missing_fields"])
+    if problems:
+        print("DATA PROBLEMS TO FIX")
+        print("-" * 21)
+        if result["missing_fields"]:
+            print("  Missing required fields:")
+            for rownum, field, label in result["missing_fields"]:
+                print(f"    row {rownum:>3}  {label:<22}  missing: {field}")
+            print()
+        if result["bad_dates"]:
+            print("  Unreadable expiry dates:")
+            for rownum, label, raw in result["bad_dates"]:
+                print(f"    row {rownum:>3}  {label:<22}  '{raw}'")
+            print()
+        if result["no_date"]:
+            print("  Items with no expiry date:")
+            for rownum, label, cat in result["no_date"]:
+                print(f"    row {rownum:>3}  {label:<22}  {cat}")
+            print()
+
+    print("SUGGESTED NEXT STEPS")
+    print("-" * 21)
+    steps = []
+    if result["expired"]:
+        steps.append(f"Contact owners of {len(result['expired'])} expired item(s) today.")
+    if result["urgent"]:
+        steps.append(f"Send reminders for {len(result['urgent'])} item(s) expiring this week.")
+    if result["soon"]:
+        steps.append(f"Book renewals for {len(result['soon'])} item(s) within 30 days.")
+    if result["bad_dates"] or result["no_date"]:
+        steps.append("Clean up unreadable or missing dates in the CSV.")
+    if not steps:
+        steps.append("Nothing urgent — come back next month.")
+    for s in steps:
+        print(f"  * {s}")
+    print()
+    print("=" * 68)
+
+
 # --- entry point ----------------------------------------------------------
 
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
+
+    if sys.argv[1] in ("--version", "-v"):
+        print(f"ask-the-group {__version__}")
+        return
 
     cmd = sys.argv[1]
 
@@ -412,6 +647,11 @@ def main():
         if len(sys.argv) < 3:
             sys.exit("Usage: python ask_the_group.py actions <folder>")
         cmd_actions(sys.argv[2])
+
+    elif cmd == "expiry":
+        if len(sys.argv) < 3:
+            sys.exit("Usage: python ask_the_group.py expiry <file.csv>")
+        cmd_expiry(sys.argv[2])
 
     else:
         print(__doc__)

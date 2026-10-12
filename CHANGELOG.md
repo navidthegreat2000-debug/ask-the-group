@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0 — Polish and release
+- `expiry` command added: reads a CSV of certificates, permits, and
+  inspections and flags what's expiring (7 / 30 / 90 day buckets).
+- `--version` flag added.
+- Consistent output headers across all four commands.
+- Version stamp included in the search index.
+
+## v0.4 — Expiry
+- `expiry` command: parses expiry CSVs and reports urgency.
+- Supports eight date formats, flags unreadable ones.
+- Detects missing required columns and items with no expiry date.
+
 ## v0.3 — Actions
 - `actions` command: pulls action items out of meeting notes.
 - Filters out discussion lines ("discussed", "might", "TBD").

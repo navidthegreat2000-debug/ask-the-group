@@ -28,6 +28,119 @@ them into answers and checklists a coordinator can actually use.
 - **`expiry`** — read a CSV of certificates / permits / inspections
   and flag what's expiring.
 
+
+One small offline Python script for volunteer coordinators. Reads the
+plain-text files a group already has and turns them into answers,
+action items, and expiry alerts.
+
+**Standard library only. No installs. No internet. No AI.**
+
+---
+
+## What it looks like
+
+### `ask`
+
+```
+$ python ask-the-group.py ask examples/group_notes "where do I park on match days"
+
+====================================================================
+  QUESTION: where do I park on match days
+====================================================================
+
+BEST MATCH
+----------
+  Source: whatsapp_2024.txt
+  Match:  0.71
+
+    [2024-03-16 09:13] Maria: No — use the church car park on match days,
+                         it's a 3 min walk.
+
+OTHER POSSIBLE MATCHES
+----------------------
+  [0.44] emails.txt     — Parking: on normal Saturdays, use the school...
+  [0.31] onboarding.md  — School car park on normal Saturdays. Church...
+```
+
+### `actions`
+
+```
+$ python ask-the-group.py actions examples/group_notes
+
+====================================================================
+  ACTION ITEMS
+  From: examples/group_notes
+====================================================================
+
+CLEAR ACTION ITEMS (4)
+----------------------
+
+  [Community Garden Committee — November Meeting]
+  meeting_2024_11.txt:12  Maria will send the updated winter schedule by Friday.
+  meeting_2024_11.txt:19  Pedro needs to check with the council about the fence height rules.
+
+  [Fundraising]
+  meeting_2024_11.txt:40  Ana to draft the grant proposal by end of month.
+  meeting_2024_11.txt:41  Sara will ask the church about tables.
+
+NEEDS A HUMAN (1)
+-----------------
+These look like actions but don't name a person or a date.
+
+  meeting_2024_11.txt:43  Someone needs to order more compost before the
+                          spring planting.
+
+SUGGESTED NEXT STEPS
+--------------------
+  * Assign owners to 1 item(s) above.
+  * Follow up on 4 clear item(s).
+```
+
+### `expiry`
+
+```
+$ python ask-the-group.py expiry examples/expiry/items.csv
+
+====================================================================
+  EXPIRY & RENEWAL TRACKER
+  File:  examples/expiry/items.csv
+  Today: 2025-03-05
+====================================================================
+
+AT A GLANCE
+-----------
+  EXPIRED ................   1  ** renew now **
+  Urgent (within 7 days) .   1
+  Soon   (within 30 days)    1
+  This quarter (<=90d) ...   0
+  Later .................   1
+  Missing date info .....   1
+  Data problems .........   2
+
+  *** 1 item(s) already expired. ***
+
+EXPIRED — RENEW IMMEDIATELY
+---------------------------
+  [  2] First Aid Certificate
+        holder: Maria Lopez   category: First Aid
+        expires: 2025-02-10  (EXPIRED 23 days ago)
+        contact: coordinator@example.org
+
+URGENT — DUE WITHIN 7 DAYS
+--------------------------
+  [  3] Food Handler Card
+        holder: Ana Reyes   category: Food Safety
+        expires: 2025-03-08  (in 3 days)
+        contact: kitchen@example.org
+
+DATA PROBLEMS TO FIX
+--------------------
+  Unreadable expiry dates:
+    row   6  Storage Room             'next spring'
+```
+
+Nothing above requires the internet, an API key, or a sign-up.
+
 ## Usage
 
     python ask-the-group.py index   examples/group_notes
